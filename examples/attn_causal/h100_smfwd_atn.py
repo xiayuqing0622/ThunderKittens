@@ -21,7 +21,7 @@ import torch.nn.functional as F
 from einops import rearrange
 
 class AttentionFunction(Function):
-    def forward(ctx, q, k, v):
+    def forward(ctx, q, k, v, tau, g4):
         
         # assert training does not support head dim 128 yet
         assert q.shape[2] == 64, "TK train currently supports head dim 64 only"
@@ -29,9 +29,9 @@ class AttentionFunction(Function):
         outputs = torch.zeros_like(v)
         l_vec = torch.zeros(q.shape[0], q.shape[1], q.shape[2], 1, device=q.device, dtype=q.dtype).contiguous()
         
-        tk.attention_forward_causal(q, k, v, outputs, l_vec)
+        tk.attention_forward_causal(q, k, v, tau, g4, outputs, l_vec)
         
-        ctx.save_for_backward(q, k, v, outputs, l_vec)
+        ctx.save_for_backward(q, k, v, tau, g4, outputs, l_vec)
         
         return outputs
 
@@ -44,12 +44,12 @@ class CustomAttention(nn.Module):
         self.d = d
         self.scale = 1 / (d ** 0.5)
 
-    def forward(self, q, k, v):
+    def forward(self, q, k, v, tau, g4):
         q = rearrange(q, 'b n (h d) -> b h n d', h=self.h).to(dtype=torch.bfloat16).contiguous()
         k = rearrange(k, 'b n (h d) -> b h n d', h=self.h).to(dtype=torch.bfloat16).contiguous()
         v = rearrange(v, 'b n (h d) -> b h n d', h=self.h).to(dtype=torch.bfloat16).contiguous()
         
-        output = AttentionFunction.apply(q, k, v)
+        output = AttentionFunction.apply(q, k, v, tau, g4)
         
         output = rearrange(output, 'b h n d -> b n (h d)')
         return output
@@ -75,7 +75,13 @@ def measure_performance(b, h, n, d):
     q = torch.randn(b, h, n, d, device=device, dtype=torch.bfloat16).contiguous()
     k = torch.randn(b, h, n, d, device=device, dtype=torch.bfloat16).contiguous()
     v = torch.randn(b, h, n, d, device=device, dtype=torch.bfloat16).contiguous()
-    
+    gate_b_q = nn.Parameter(torch.zeros(1, h, 1, d, dtype=torch.float32, device='cuda:0').normal_(mean=0,std=0.1))
+    gate_b_k = nn.Parameter(torch.zeros(1, h, 1, d, dtype=torch.float32, device='cuda:0').normal_(mean=0,std=0.1))
+    gate_tau = nn.Parameter(torch.zeros(1, h, 1, 1, dtype=torch.float32, device='cuda:0'))
+    tau = 1 + gate_tau
+    g4 = torch.sum(gate_b_q * gate_b_k, dim=-1, keepdim=True) - 1.0
+    tau = tau.to(torch.bfloat16)
+    g4 = g4.to(torch.bfloat16)
     q.grad = None
     k.grad = None
     v.grad = None
@@ -88,7 +94,7 @@ def measure_performance(b, h, n, d):
 
     # Warm up
     for _ in range(10):
-        tk.attention_forward_causal(q, k, v, o)
+        tk.attention_forward_causal(q, k, v, tau, g4, o)
         
     
     torch.cuda.synchronize()
@@ -100,7 +106,7 @@ def measure_performance(b, h, n, d):
         start_events[i].record()
         
         torch.cuda.synchronize()  # Wait for the events to be recorded!
-        tk.attention_forward_causal(q, k, v, o)
+        tk.attention_forward_causal(q, k, v, tau, g4, o)
         torch.cuda.synchronize()  # Wait for the events to be recorded!
         
         end_events[i].record()

@@ -1,4 +1,4 @@
-// #define TORCH_COMPILE // defined by default for PyTorch bindings - to use cpp harness, comment this out
+#define TORCH_COMPILE // defined by default for PyTorch bindings - to use cpp harness, comment this out
 
 #ifdef TORCH_COMPILE
 #include "src/kittens.cuh"
@@ -70,7 +70,9 @@ constexpr int kv_height = 4;
 
 template<int D>
 __global__  __launch_bounds__((NUM_WORKERS)*kittens::WARP_THREADS, 2)
-void fwd_attend_ker_dim(int N, const CUtensorMap* tma_q, const CUtensorMap* tma_k, const CUtensorMap* tma_v, CUtensorMap* tma_o) {
+void fwd_attend_ker_dim(int N, int H, const CUtensorMap* tma_q, const CUtensorMap* tma_k, const CUtensorMap* tma_v, 
+ __nv_bfloat16* __restrict__ tau,  __nv_bfloat16* __restrict__ g4,
+CUtensorMap* tma_o) {
     extern __shared__ int __shm[]; // this is the CUDA shared memory
     tma_swizzle_allocator al((int*)&__shm[0]);
 
@@ -81,9 +83,10 @@ void fwd_attend_ker_dim(int N, const CUtensorMap* tma_q, const CUtensorMap* tma_
     int tic = 0, toc = 1;
  
     rt_fl<1, kv_height> att_block;
+    rt_fl<1, kv_height> gate_block;
     rt_bf<1, kv_height> att_block_mma;
     rt_fl<1, D/kittens::TILE_DIM> o_prev;
-    rt_fl<1, kv_height>::col_vec max_vec_last,  max_vec;
+    rt_fl<1, kv_height>::col_vec max_vec_last,  max_vec, gate_max_vec_last, gate_max_vec;
     rt_fl<1, kv_height>::col_vec norm_vec_last, norm_vec;
 
     int warpid      = kittens::warpid();
@@ -114,10 +117,13 @@ void fwd_attend_ker_dim(int N, const CUtensorMap* tma_q, const CUtensorMap* tma_
             tma::load_async((v_smem[tic][w]), tma_v, kvsmem_barrier, tile_idx); 
         }
     }
-
+    int tau_index = blockIdx.y % H;
+    float r_tau = __bfloat162float(tau[tau_index]);
+    float r_g4 = __bfloat162float(g4[tau_index]);
     neg_infty(max_vec); // zero registers for the Q chunk
     zero(norm_vec);
     zero(o_prev);
+    zero(gate_max_vec);
     __syncthreads();
 
     tma::arrive_and_wait(qsmem_barrier, q_phasebit);
@@ -149,6 +155,7 @@ void fwd_attend_ker_dim(int N, const CUtensorMap* tma_q, const CUtensorMap* tma_
 
         copy(norm_vec_last, norm_vec);
         copy(max_vec_last,  max_vec);
+        copy(gate_max_vec_last, gate_max_vec);
 
         warpgroup::mma_async_wait();
 
@@ -156,7 +163,21 @@ void fwd_attend_ker_dim(int N, const CUtensorMap* tma_q, const CUtensorMap* tma_
             wg_make_causal(att_block, att_block, -INFINITY); 
         }
 
+        #pragma unroll
+        for(int i = 0; i < gate_block.height; i++) {
+            #pragma unroll
+            for(int j = 0; j < gate_block.width; j++) {  
+                #pragma unroll
+                for(int k = 0; k < gate_block.packed_per_tile; k++) {
+                    gate_block.tiles[i][j].data[k].x = 1/(1 + exp2f(-((att_block.tiles[i][j].data[k].x + r_g4) * M_LOG2E)/r_tau));
+                    gate_block.tiles[i][j].data[k].y = 1/(1 + exp2f(-((att_block.tiles[i][j].data[k].y + r_g4) * M_LOG2E)/r_tau));
+                }
+            }
+        }
+            
+
         row_max(max_vec, att_block, max_vec); // accumulate onto the max_vec
+        row_max(gate_max_vec, gate_block, gate_max_vec);
         sub_row(att_block, att_block, max_vec);
         exp(att_block, att_block);
 
@@ -169,9 +190,12 @@ void fwd_attend_ker_dim(int N, const CUtensorMap* tma_q, const CUtensorMap* tma_
 
         mul(norm_vec_last, norm_vec_last, max_vec_last);
         div(norm_vec_last, norm_vec_last, norm_vec);
+        mul(norm_vec_last, norm_vec_last, gate_max_vec_last);
+        div(norm_vec_last, norm_vec_last, gate_max_vec);
 
         copy(att_block_mma, att_block); // convert to bf16 for mma
         mul_row(o_prev, o_prev, norm_vec_last); // normalize o_prev in advance of mma'ing onto it
+
 
         warpgroup::mma_fence(o_prev);
         warpgroup::mma_AB(o_prev, att_block_mma, v_smem[tic][0]);
@@ -195,7 +219,7 @@ void fwd_attend_ker_dim(int N, const CUtensorMap* tma_q, const CUtensorMap* tma_
 #include "src/common/pyutils/torch_helpers.cuh"
 #include <iostream>
 
-void attention_forward_causal(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor o) {
+void attention_forward_causal(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor tau, torch::Tensor g4,torch::Tensor o) {
 
     CHECK_INPUT(q);
     CHECK_INPUT(k);
@@ -225,11 +249,16 @@ void attention_forward_causal(torch::Tensor q, torch::Tensor k, torch::Tensor v,
     c10::BFloat16 *k_ptr = k.data_ptr<c10::BFloat16>();
     c10::BFloat16 *v_ptr = v.data_ptr<c10::BFloat16>();
     c10::BFloat16 *o_ptr = o.data_ptr<c10::BFloat16>();
+    c10::BFloat16 *tau_ptr = tau.data_ptr<c10::BFloat16>();
+    c10::BFloat16 *g4_ptr = g4.data_ptr<c10::BFloat16>();
 
     const bf16* q_bf = reinterpret_cast<const bf16*>(q_ptr);
     const bf16* k_bf = reinterpret_cast<const bf16*>(k_ptr);
     const bf16* v_bf = reinterpret_cast<const bf16*>(v_ptr);
+    __nv_bfloat16* tau_bf = reinterpret_cast< __nv_bfloat16*>(tau_ptr);
+    __nv_bfloat16* g4_bf = reinterpret_cast< __nv_bfloat16*>(g4_ptr);
     bf16* o_bf = reinterpret_cast<bf16*>(o_ptr);
+
 
     if (D == 64) {
         CUtensorMap* tma_q_d = tma::allocate_and_create_tensor_map<kittens::st_bf<qo_height, 4, layout_q>>(q_bf, (batch*heads*N)/(qo_height * 16));
@@ -242,7 +271,7 @@ void attention_forward_causal(torch::Tensor q, torch::Tensor k, torch::Tensor v,
 
         dim3 grid(N/(NUM_WORKERS*kittens::TILE_DIM), batch*heads, 1);
 
-        fwd_attend_ker_dim<64><<<grid, threads, mem_size>>>(N, tma_q_d, tma_k_d, tma_v_d, tma_o_d);
+        fwd_attend_ker_dim<64><<<grid, threads, mem_size>>>(N, heads,  tma_q_d, tma_k_d, tma_v_d, tau_bf, g4_bf, tma_o_d);
     }
     else {
         CUtensorMap* tma_q_d = tma::allocate_and_create_tensor_map<kittens::st_bf<qo_height, 8, layout_q>>(q_bf, (batch*heads*N)/(qo_height * 16));
@@ -255,7 +284,7 @@ void attention_forward_causal(torch::Tensor q, torch::Tensor k, torch::Tensor v,
 
         dim3 grid(N/(NUM_WORKERS*kittens::TILE_DIM), batch*heads, 1);
 
-        fwd_attend_ker_dim<128><<<grid, threads, mem_size>>>(N, tma_q_d, tma_k_d, tma_v_d, tma_o_d);
+        fwd_attend_ker_dim<128><<<grid, threads, mem_size>>>(N, heads, tma_q_d, tma_k_d, tma_v_d, tau_bf, g4_bf, tma_o_d);
     }
     
     CHECK_CUDA_ERROR(cudaGetLastError());
