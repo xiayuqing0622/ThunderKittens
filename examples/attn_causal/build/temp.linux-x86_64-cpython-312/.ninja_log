@@ -1,4 +1,0 @@
-# ninja log v5
-0	12936	1715671591991198966	/home/lidong1/yuqxia/ThunderKittens/examples/attn_causal/build/temp.linux-x86_64-cpython-312/h100_fwd_frontend.o	6a837727c8791db
-0	48064	1715671627095599874	/home/lidong1/yuqxia/ThunderKittens/examples/attn_causal/build/temp.linux-x86_64-cpython-312/h100_fwd.o	b913a786d50e9a4
-32	13010	1715672438948885042	/home/lidong1/yuqxia/ThunderKittens/examples/attn_causal/build/temp.linux-x86_64-cpython-312/h100_fwd_frontend.o	6a837727c8791db

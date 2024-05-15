@@ -1,0 +1,3 @@
+# ninja log v5
+0	13172	1715773419175471889	/home/lidong1/yuqxia/ThunderKittens/examples/sm_attn_causal/build/temp.linux-x86_64-cpython-310/h100_fwd_frontend.o	2d1b52fd69a815c1
+0	49275	1715773455243828083	/home/lidong1/yuqxia/ThunderKittens/examples/sm_attn_causal/build/temp.linux-x86_64-cpython-310/h100_fwd.o	b57655b4dfbe49a6
