@@ -31,6 +31,14 @@ __device__ static inline void unary_map(T &dst, const T &src) {
     }
 }
 
+
+template<typename Op, typename T, typename Scaledtype>
+__device__ static inline void bin_map_scale(T &dst, const T &src, const typename T::dtype &param, Scaledtype scale) {
+    #pragma unroll
+    for(int i = kittens::laneid(); i < dst.num_elements; i += WARP_THREADS) {
+        dst.data[i] = Op::template op<typename T::dtype, Scaledtype>(src.data[i], param, scale);
+    }
+}
 /**
  * @brief Performs a uniform binary operation on a tile with a scalar parameter.
  * 
@@ -169,7 +177,10 @@ template<ducks::st::all T>
 __device__ static inline void neg_infty(T &dst) {
     unary_map<base_ops::neg_infty, T>(dst, dst);
 }
-
+template<ducks::st::all T>
+__device__ static inline void sigmoid(T &dst, const T &src) {
+    unary_map<base_ops::sigmoid, T>(dst, src);
+}
 // unary maps
 /**
  * @brief Applies the exponential function to each element of the source tile and stores the result in the destination tile.

@@ -141,6 +141,10 @@ template<ducks::rv::all T, typename U>
 __device__ static inline void copy(T &dst, const U &src) {
     bin_op<base_ops::copy2, T>(dst, dst, src); // the second arg is ignored here.
 }
+template<ducks::rv::all T>
+__device__ static inline void sigmoid(T &dst, const T &src) {
+    unary_op<base_ops::sigmoid, T>(dst, src);
+}
 /**
  * @brief Applies the exponential function element-wise to a register vector.
  *

@@ -161,6 +161,11 @@ __device__ static inline void neg_infty(T &dst) {
 }
 
 // unary maps
+
+template<ducks::st::all T>
+__device__ static inline void sigmoid(T &dst, const T &src) {
+    unary_map<base_ops::sigmoid, T>(dst, src);
+}
 /**
  * @brief Applies the exponential function to each element of the source tile and stores the result in the destination tile.
  * 
@@ -258,6 +263,10 @@ template<ducks::st::all T, typename U>
 __device__ static inline void add(T &dst, const T &lhs, const U &rhs) {
     bin_map<base_ops::sum, T>(dst, lhs, rhs);
 }
+template<ducks::st::all T, typename Scaledtype>
+__device__ static inline void add_scale(T &dst, const T &lhs, Scaledtype scale) {
+    bin_map_scale<base_ops::sum, T, Scaledtype>(dst, lhs, scale);
+}
 /**
  * @brief Subtracts each pair of corresponding elements in the two source tiles and stores the result in the destination tile.
  * 
@@ -284,6 +293,11 @@ template<ducks::st::all T, typename U>
 __device__ static inline void mul(T &dst, const T &lhs, const U &rhs) {
     bin_map<base_ops::mul, T>(dst, lhs, rhs);
 }
+
+template<ducks::st::all T, typename Scaledtype>
+__device__ static inline void mul_scale(T &dst, const T &lhs, Scaledtype scale) {
+    bin_map_scale<base_ops::mul, T, Scaledtype>(dst, lhs, scale);
+}
 /**
  * @brief Divides each pair of corresponding elements in the two source tiles and stores the result in the destination tile.
  * 
@@ -298,6 +312,10 @@ __device__ static inline void div(T &dst, const T &lhs, const U &rhs) {
     bin_map<base_ops::div, T>(dst, lhs, rhs);
 }
 
+template<ducks::st::all T, typename Scaledtype>
+__device__ static inline void div_scale(T &dst, const T &lhs, Scaledtype scale) {
+    bin_map_scale<base_ops::mul, T, Scaledtype>(dst, lhs, scale);
+}
 // Row and col maps
 
 /**

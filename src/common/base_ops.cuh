@@ -68,6 +68,12 @@ struct neg_infty {
 
 /* ----------  UNARY OPS  ---------- */
 
+struct sigmoid {
+    template<typename T> static __device__ inline T op(const T &x) { return 1/ (1 + exp(-x)); }
+};
+template<> __device__ inline float  sigmoid::op<float> (const float &x ) { return 1.0f/ (1.0f + __expf(-x)); }
+template<> __device__ inline float2 sigmoid::op<float2>(const float2 &x) { return float2{1.0f/ (1.0f + __expf(-x.x)), 1.0f/ (1.0f + __expf(-x.y))}; }
+
 /**
  * @brief Exponential function operation.
  *

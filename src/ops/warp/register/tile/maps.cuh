@@ -410,7 +410,10 @@ template<ducks::rt::all T>
 __device__ static inline void neg_infty(T &dst) {
     unary_map<base_ops::neg_infty, T>(dst, dst);
 }
-
+template<ducks::rt::all T>
+__device__ static inline void sigmoid(T &dst, const T &src) {
+    unary_map<base_ops::sigmoid, T>(dst, src);
+}
 /**
  * @brief Applies the exponential function to each element of a tile.
  *

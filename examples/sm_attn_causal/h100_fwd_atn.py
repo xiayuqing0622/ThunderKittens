@@ -119,6 +119,7 @@ def measure_performance(b, h, n, d):
     
     print(f"Head Dim = {d}, Seq Len = {n}, Heads = {h}, Batch = {b}")
     print(f"Average time taken: {time_us:.2f} us")
+    print(f"flops: {flops(b, n, d, h, True, 'fwd'):.2f}")
     print(f"Efficiency: {tflops:.2f} TFLOPS")
     print(f"______________________________________________________")
 

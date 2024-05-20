@@ -73,8 +73,11 @@ __global__  __launch_bounds__((NUM_WORKERS)*kittens::WARP_THREADS, 2)
 void fwd_attend_ker_dim(int N, int H, const CUtensorMap* tma_q, const CUtensorMap* tma_k, const CUtensorMap* tma_v, 
  __nv_bfloat16* __restrict__ tau,  __nv_bfloat16* __restrict__ g4,
 CUtensorMap* tma_o) {
-    extern __shared__ int __shm[]; // this is the CUDA shared memory
-    tma_swizzle_allocator al((int*)&__shm[0]);
+    extern __shared__ char __shm[]; // this is the CUDA shared memory
+    uint64_t* smem_barrier = (uint64_t*)(__shm);
+    int* smem = (int*)(__shm + sizeof(uint64_t) * 2);
+    // tma_swizzle_allocator al((int*)&__shm[0]);
+    tma_swizzle_allocator al(smem);
 
     st_bf<qo_height, D/kittens::TILE_DIM, layout_q>          (&q_smem)   [NUM_WARPGROUPS] = al.allocate<st_bf<qo_height, D/kittens::TILE_DIM, layout_q>,          NUM_WARPGROUPS>();
     st_bf<kv_height, D/kittens::TILE_DIM, layout_k>          (&k_smem)[2][NUM_WORKERS_KV] = al.allocate<st_bf<kv_height, D/kittens::TILE_DIM, layout_k>, 2,       NUM_WORKERS_KV>();
@@ -96,25 +99,27 @@ CUtensorMap* tma_o) {
 
     int kv_blocks = N / (NUM_WORKERS_KV*k_smem[0][0].rows);
 
-    __shared__ uint64_t qsmem_barrier, kvsmem_barrier;//, vsmem_barrier;
+    // __shared__ uint64_t smem_barrier[0], smem_barrier[1];//, vsmem_barrier;
+    // auto smem_barrier[0] = smem_barrier[0];
+    // auto smem_barrier[1] = smem_barrier[1];
 
     int q_phasebit = 0;
     int kv_phasebit = 0;
 
     if (threadIdx.x == 0) {
-        tma::init_barrier<st_bf<qo_height, D/kittens::TILE_DIM, layout_q>, NUM_WARPGROUPS>(qsmem_barrier, 1);
-        tma::init_barrier<st_bf<kv_height, D/kittens::TILE_DIM, layout_k>, NUM_WORKERS_KV*2>(kvsmem_barrier, 1); 
+        tma::init_barrier<st_bf<qo_height, D/kittens::TILE_DIM, layout_q>, NUM_WARPGROUPS>(smem_barrier[0], 1);
+        tma::init_barrier<st_bf<kv_height, D/kittens::TILE_DIM, layout_k>, NUM_WORKERS_KV*2>(smem_barrier[1], 1); 
     }
 
     if (warpid == 0) {
         for (int wg = 0; wg < NUM_WORKERS/kittens::WARPGROUP_WARPS; wg++) { // load q
             int tile_idx = (blockIdx.y * NUM_WARPGROUPS * gridDim.x) + (blockIdx.x * NUM_WARPGROUPS) + wg;
-            tma::load_async((q_smem[wg]), tma_q, qsmem_barrier, tile_idx); 
+            tma::load_async((q_smem[wg]), tma_q, smem_barrier[0], tile_idx); 
         }
         for (int w = 0; w < NUM_WORKERS_KV; w++) { // load k, v      
             int tile_idx = (blockIdx.y * NUM_WORKERS_KV * kv_blocks) + (0 * NUM_WORKERS_KV) + w; 
-            tma::load_async((k_smem[tic][w]), tma_k, kvsmem_barrier, tile_idx); 
-            tma::load_async((v_smem[tic][w]), tma_v, kvsmem_barrier, tile_idx); 
+            tma::load_async((k_smem[tic][w]), tma_k, smem_barrier[1], tile_idx); 
+            tma::load_async((v_smem[tic][w]), tma_v, smem_barrier[1], tile_idx); 
         }
     }
     int tau_index = blockIdx.y % H;
@@ -126,25 +131,25 @@ CUtensorMap* tma_o) {
     zero(gate_max_vec);
     __syncthreads();
 
-    tma::arrive_and_wait(qsmem_barrier, q_phasebit);
+    tma::arrive_and_wait(smem_barrier[0], q_phasebit);
     q_phasebit ^= 1;
 
     if constexpr (D == 64) { warpgroup::mul(q_smem[warpgroupid], q_smem[warpgroupid], __float2bfloat16(0.125f)); }
     else { warpgroup::mul(q_smem[warpgroupid], q_smem[warpgroupid], __float2bfloat16(0.08838834764f)); }
 
     for (auto kv_idx = 0; kv_idx <= qo_index; kv_idx++, tic ^= 1, toc ^= 1) {
-        tma::arrive_and_wait(kvsmem_barrier, kv_phasebit);
+        tma::arrive_and_wait(smem_barrier[1], kv_phasebit);
         kv_phasebit ^= 1;
 
         __syncthreads();
         if (warpid == 0) {
             if (kv_idx + 1 < kv_blocks) {
-                tma::set_bytes(kvsmem_barrier, 2 * NUM_WORKERS_KV * k_smem[0][0].num_elements * sizeof(bf16));
+                tma::set_bytes(smem_barrier[1], 2 * NUM_WORKERS_KV * k_smem[0][0].num_elements * sizeof(bf16));
                 
                 for (int w = 0; w < NUM_WORKERS_KV; w++) {        
                     int tile_idx = (blockIdx.y * NUM_WORKERS_KV * kv_blocks) + ((kv_idx + 1) * NUM_WORKERS_KV) + w; 
-                    tma::load_async((k_smem[toc][w]), tma_k, kvsmem_barrier, tile_idx); 
-                    tma::load_async((v_smem[toc][w]), tma_v, kvsmem_barrier, tile_idx);
+                    tma::load_async((k_smem[toc][w]), tma_k, smem_barrier[1], tile_idx); 
+                    tma::load_async((v_smem[toc][w]), tma_v, smem_barrier[1], tile_idx);
                 }
             }
         }
@@ -163,17 +168,20 @@ CUtensorMap* tma_o) {
             wg_make_causal(att_block, att_block, -INFINITY); 
         }
 
-        #pragma unroll
-        for(int i = 0; i < gate_block.height; i++) {
-            #pragma unroll
-            for(int j = 0; j < gate_block.width; j++) {  
-                #pragma unroll
-                for(int k = 0; k < gate_block.packed_per_tile; k++) {
-                    gate_block.tiles[i][j].data[k].x = 1/(1 + exp2f(-((att_block.tiles[i][j].data[k].x + r_g4) * M_LOG2E)/r_tau));
-                    gate_block.tiles[i][j].data[k].y = 1/(1 + exp2f(-((att_block.tiles[i][j].data[k].y + r_g4) * M_LOG2E)/r_tau));
-                }
-            }
-        }
+        // #pragma unroll
+        // for(int i = 0; i < gate_block.height; i++) {
+        //     #pragma unroll
+        //     for(int j = 0; j < gate_block.width; j++) {  
+        //         #pragma unroll
+        //         for(int k = 0; k < gate_block.packed_per_tile; k++) {
+        //             gate_block.tiles[i][j].data[k].x = 1/(1 + exp2f(-((att_block.tiles[i][j].data[k].x + r_g4) * M_LOG2E)/r_tau));
+        //             gate_block.tiles[i][j].data[k].y = 1/(1 + exp2f(-((att_block.tiles[i][j].data[k].y + r_g4) * M_LOG2E)/r_tau));
+        //         }
+        //     }
+        // }
+        add(gate_block, att_block, (float)r_g4);
+        div(gate_block, gate_block, (float)r_tau);
+        sigmoid(gate_block, gate_block);
             
 
         row_max(max_vec, att_block, max_vec); // accumulate onto the max_vec
@@ -294,6 +302,6 @@ void attention_forward_causal(torch::Tensor q, torch::Tensor k, torch::Tensor v,
     CHECK_CUDA_ERROR(cudaGetLastError());
 }
 #else
-#include "harness_h100_fwd.impl"
+// #include "harness_h100_fwd.impl"
 #endif
 

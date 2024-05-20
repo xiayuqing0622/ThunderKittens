@@ -285,8 +285,8 @@ namespace cg = cooperative_groups;
 
 __global__ __launch_bounds__(WORKERS_BWD*kittens::WARP_THREADS, 2)
 void attend_ker_bwd_train(const int N, CUtensorMap* tma_q, CUtensorMap* tma_k, CUtensorMap* tma_v, 
-                            CUtensorMap* tma_l_vec, CUtensorMap* tma_d_vec, 
-                            CUtensorMap* tma_og, CUtensorMap* tma_qg, CUtensorMap* tma_kg, CUtensorMap* tma_vg)
+                            CUtensorMap* tma_l_vec, CUtensorMap* tma_gatemax_vec,CUtensorMap* tma_d_vec, 
+                            CUtensorMap* tma_og, CUtensorMap* tma_qg, CUtensorMap* tma_kg, CUtensorMap* tma_vg, const bf16* tau, const bf16* g4)
 {
     extern __shared__ int __shm[]; // this is the CUDA shared memory
     tma_swizzle_allocator al((int*)&__shm[0]);
@@ -297,8 +297,9 @@ void attend_ker_bwd_train(const int N, CUtensorMap* tma_q, CUtensorMap* tma_k, C
     q_smem_tile  (&q_smem) [2][NUM_WARPGROUPS_BWD_QO]                     = al.allocate<q_smem_tile,  2, NUM_WARPGROUPS_BWD_QO>();
     og_smem_tile (&og_smem)[2][NUM_WARPGROUPS_BWD_QO]                     = al.allocate<og_smem_tile, 2, NUM_WARPGROUPS_BWD_QO>();
     qg_smem_tile (&qg_smem)[2][NUM_WARPGROUPS_BWD_QO][NUM_WARPGROUPS_BWD] = al.allocate<qg_smem_tile, 2, NUM_WARPGROUPS_BWD_QO, NUM_WARPGROUPS_BWD>();
-    
+
     l_smem_tile  (&l_smem) [2][NUM_WARPGROUPS_BWD_QO]                     = al.allocate<l_smem_tile,  2, NUM_WARPGROUPS_BWD_QO>();
+    gatemax_smem_tile (&gatemax_smem) [2][NUM_WARPGROUPS_BWD_QO]          = al.allocate<gatemax_smem_tile, 2, NUM_WARPGROUPS_BWD_QO>();
     d_smem_tile  (&d_smem) [2][NUM_WARPGROUPS_BWD_QO]                     = al.allocate<d_smem_tile,  2, NUM_WARPGROUPS_BWD_QO>();
 
     rt_fl<tile_h/kittens::WARPGROUP_WARPS, tile_w> kg_reg;
@@ -306,12 +307,16 @@ void attend_ker_bwd_train(const int N, CUtensorMap* tma_q, CUtensorMap* tma_k, C
 
     rt_fl<tile_h_qo/kittens::WARPGROUP_WARPS, tile_w> qg_reg;
 
-    rt_bf<tile_h_qo/kittens::WARPGROUP_WARPS, tile_h>::col_vec l_reg_bf; 
+    rt_bf<tile_h_qo/kittens::WARPGROUP_WARPS, tile_h>::col_vec l_reg_bf;
+    rt_bf<tile_h_qo/kittens::WARPGROUP_WARPS, tile_h>::col_vec gatemax_reg_bf; 
     rt_bf<tile_h_qo/kittens::WARPGROUP_WARPS, tile_h>::col_vec d_reg_bf;
     rt_fl<tile_h_qo/kittens::WARPGROUP_WARPS, tile_h>::col_vec l_reg_fl; 
     rt_fl<tile_h_qo/kittens::WARPGROUP_WARPS, tile_h>::col_vec d_reg_fl;
 
     rt_fl<tile_h_qo/kittens::WARPGROUP_WARPS, tile_h> att_block; 
+    rt_fl<tile_h_qo/kittens::WARPGROUP_WARPS, tile_h> gate_block;
+    rt_fl<tile_h_qo/kittens::WARPGROUP_WARPS, tile_h> p_block;
+    rt_fl<tile_h_qo/kittens::WARPGROUP_WARPS, tile_h> p1_block;
     rt_bf<tile_h_qo/kittens::WARPGROUP_WARPS, tile_h> att_block_mma;
     rt_fl<tile_h_qo/kittens::WARPGROUP_WARPS, tile_h> temp_block;
 
@@ -331,7 +336,7 @@ void attend_ker_bwd_train(const int N, CUtensorMap* tma_q, CUtensorMap* tma_k, C
     if (threadIdx.x == 0) {
         tma::init_barrier<q_smem_tile,  NUM_WARPGROUPS_BWD_QO * 2>(qo_b,  1); // q, og
         tma::init_barrier<k_smem_tile,  NUM_WARPGROUPS_BWD    * 2>(kv_b,  1); // k, v
-        tma::init_barrier<l_smem_tile,  NUM_WARPGROUPS_BWD_QO * 2>(vec_b, 1); // l, d
+        tma::init_barrier<l_smem_tile,  NUM_WARPGROUPS_BWD_QO * 2>(vec_b, 1); // l, d, gatemax
     } 
 
     if (warpid == 0) {
@@ -342,6 +347,7 @@ void attend_ker_bwd_train(const int N, CUtensorMap* tma_q, CUtensorMap* tma_k, C
             tma::load_async((og_smem[tic][w]),    tma_og,    qo_b, tile_idx);
 
             tma::load_async((l_smem[tic][w]),     tma_l_vec, vec_b, tile_idx);
+            tma::load_async((gatemax_smem[tic][w]), tma_gatemax_vec, vec_b, tile_idx);
             tma::load_async((d_smem[tic][w]),     tma_d_vec, vec_b, tile_idx);
         } 
     }
@@ -357,6 +363,9 @@ void attend_ker_bwd_train(const int N, CUtensorMap* tma_q, CUtensorMap* tma_k, C
 
     zero(kg_reg);
     zero(vg_reg);
+    int tau_index = blockIdx.y % H;
+    float r_tau = __bfloat162float(tau[tau_index]);
+    float r_g4 = __bfloat162float(g4[tau_index]);
 
     for (int qo_idx = blockIdx.x; qo_idx < qo_blocks; qo_idx++, tic ^= 1, toc ^= 1) {
 
@@ -381,6 +390,7 @@ void attend_ker_bwd_train(const int N, CUtensorMap* tma_q, CUtensorMap* tma_k, C
                     tma::load_async((og_smem[toc][w]),    tma_og,  qo_b, tile_idx);
 
                     tma::load_async((l_smem[toc][w]),     tma_l_vec, vec_b, tile_idx);
+                    tma::load_async((gatemax_smem[toc][w]), tma_gatemax_vec, vec_b, tile_idx);
                     tma::load_async((d_smem[toc][w]),     tma_d_vec, vec_b, tile_idx);
                 }
             }
@@ -396,6 +406,8 @@ void attend_ker_bwd_train(const int N, CUtensorMap* tma_q, CUtensorMap* tma_k, C
 
         warpgroup::load(l_reg_bf, l_smem[tic][0]);
         copy(l_reg_fl, l_reg_bf);
+        warpgroup::load(gatemax_reg_bf, gatemax_smem[tic][0]);
+        copy(gatemax_reg_fl, gatemax_reg_bf);
         
         warpgroup::mma_async_wait();
         mul(att_block, att_block, 0.125f);
@@ -403,11 +415,18 @@ void attend_ker_bwd_train(const int N, CUtensorMap* tma_q, CUtensorMap* tma_k, C
         if (blockIdx.x == qo_idx) {
             wg_make_causal(att_block, att_block, -INFINITY); 
         }
+        //compute gate
+        add(gate_block, att_block, (float)r_g4);
+        div(gate_block, gate_block, (float)r_tau);
+        sigmoid(gate_block, gate_block);
 
-        sub_row(att_block, att_block, l_reg_fl);
-        exp(att_block, att_block);
+        sub_row(p1_block, att_block, l_reg_fl);
+        exp(p1_block, p1_block);
+        mul(p_block, p1_block, att_block);
+        div(p_block, p_block, gatemax_reg_fl);
+
         copy(temp_block, att_block);
-        copy(att_block_mma, att_block);
+        copy(att_block_mma, p_block);
 
         auto (*att_smem)[NUM_WARPGROUPS_BWD_QO][NUM_WARPGROUPS_BWD] = reinterpret_cast<st_bf<tile_h_qo, tile_w, layout_wgmma_itl> (*)[NUM_WARPGROUPS_BWD_QO][NUM_WARPGROUPS_BWD]>(qg_smem); 
 
@@ -518,13 +537,16 @@ void attention_train_forward_causal(torch::Tensor q, torch::Tensor k, torch::Ten
     CHECK_CUDA_ERROR(cudaGetLastError());
 }
 
-void attention_train_backward_causal(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor o, torch::Tensor l_vec, torch::Tensor d_vec, torch::Tensor og, torch::Tensor qg, torch::Tensor kg, torch::Tensor vg) {
+void attention_train_backward_causal(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor Tau, torch::Tensor G4, torch::Tensor o, torch::Tensor l_vec, torch::Tensor d_vec, torch::Tensor gatemax_vec, torch::Tensor og, torch::Tensor qg, torch::Tensor kg, torch::Tensor vg) {
     CHECK_INPUT(q);
     CHECK_INPUT(k);
     CHECK_INPUT(v);
+    CHECK_INPUT(tau);
+    CHECK_INPUT(g4);
     CHECK_INPUT(o);
     CHECK_INPUT(l_vec);
     CHECK_INPUT(d_vec);
+    CHECK_INPUT(gatemax_vec);
     CHECK_INPUT(og);
     CHECK_INPUT(qg);
     CHECK_INPUT(kg);
@@ -545,8 +567,11 @@ void attention_train_backward_causal(torch::Tensor q, torch::Tensor k, torch::Te
     c10::BFloat16 *q_ptr  = q.data_ptr<c10::BFloat16>();
     c10::BFloat16 *k_ptr  = k.data_ptr<c10::BFloat16>();
     c10::BFloat16 *v_ptr  = v.data_ptr<c10::BFloat16>();
+    c10::BFloat16 *tau_ptr  = o.data_ptr<c10::BFloat16>();
+    c10::BFloat16 *g4_ptr  = o.data_ptr<c10::BFloat16>();
     c10::BFloat16 *o_ptr  = o.data_ptr<c10::BFloat16>();
     c10::BFloat16 *l_ptr  = l_vec.data_ptr<c10::BFloat16>();
+    float *gatemax_ptr = gatemax_vec.data_ptr<float>();
     c10::BFloat16 *og_ptr = og.data_ptr<c10::BFloat16>();
     c10::BFloat16 *d_ptr  = d_vec.data_ptr<c10::BFloat16>();
     c10::BFloat16 *qg_ptr = qg.data_ptr<c10::BFloat16>();
@@ -556,8 +581,11 @@ void attention_train_backward_causal(torch::Tensor q, torch::Tensor k, torch::Te
     const bf16* q_bf  = reinterpret_cast<const bf16*>(q_ptr);
     const bf16* k_bf  = reinterpret_cast<const bf16*>(k_ptr);
     const bf16* v_bf  = reinterpret_cast<const bf16*>(v_ptr);
+    const bf16* tau_bf  = reinterpret_cast<const bf16*>(tau_ptr);
+    const bf16* g4_bf  = reinterpret_cast<const bf16*>(g4_ptr);
     const bf16* o_bf  = reinterpret_cast<const bf16*>(o_ptr);
     const bf16* l_bf  = reinterpret_cast<const bf16*>(l_ptr);
+    const float* gatemax_f = reinterpret_cast<const float*>(gatemax_ptr);
     const bf16* og_bf = reinterpret_cast<const bf16*>(og_ptr);
     bf16* d_bf        = reinterpret_cast<bf16*>(d_ptr);
     bf16* qg_bf       = reinterpret_cast<bf16*>(qg_ptr);
@@ -579,6 +607,7 @@ void attention_train_backward_causal(torch::Tensor q, torch::Tensor k, torch::Te
     CUtensorMap* tma_b_k_d  = tma::allocate_and_create_tensor_map<k_smem_tile> (k_bf,  (batch*heads*N)/(tile_h    * 16));
     CUtensorMap* tma_b_v_d  = tma::allocate_and_create_tensor_map<v_smem_tile> (v_bf,  (batch*heads*N)/(tile_h    * 16));
     CUtensorMap* tma_b_l_d  = tma::allocate_and_create_tensor_map<l_smem_tile> (l_bf,  (batch*heads*N)/(tile_h_qo * 16));
+    CUtensorMap* tma_b_gatemax_d = tma::allocate_and_create_tensor_map<l_smem_tile>(gatemax_f, (batch*heads*N)/(tile_h_qo * 16));
     CUtensorMap* tma_n_d_d  = tma::allocate_and_create_tensor_map<d_smem_tile> (d_bf,  (batch*heads*N)/(tile_h_qo * 16));
     CUtensorMap* tma_n_og_d = tma::allocate_and_create_tensor_map<og_smem_tile>(og_bf, (batch*heads*N)/(tile_h_qo * 16));
     CUtensorMap* tma_b_qg_d = tma::allocate_and_create_tensor_map<qg_smem_tile>(qg_bf, (batch*heads*N)/(tile_h_qo * 16));
@@ -592,7 +621,7 @@ void attention_train_backward_causal(torch::Tensor q, torch::Tensor k, torch::Te
     );
 
     dim3 grid_2(N/(WORKERS_BWD*kittens::TILE_DIM), batch*heads, 1);
-    attend_ker_bwd_train<<<grid_2, (kittens::WARP_THREADS*WORKERS_BWD), 112000>>>(N, tma_b_q_d, tma_b_k_d, tma_b_v_d, tma_b_l_d, tma_n_d_d, tma_n_og_d, tma_b_qg_d, tma_b_kg_d, tma_b_vg_d); 
+    attend_ker_bwd_train<<<grid_2, (kittens::WARP_THREADS*WORKERS_BWD), 112000>>>(N, tma_b_q_d, tma_b_k_d, tma_b_v_d, tma_b_l_d, tma_b_gatemax_d, tma_n_d_d, tma_n_og_d, tma_b_qg_d, tma_b_kg_d, tma_b_vg_d, tau_bf, g4_bf); 
 
     CHECK_CUDA_ERROR(cudaGetLastError());
 }
