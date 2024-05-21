@@ -9,7 +9,7 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.abspath(os.path.join(current_dir, "../../"))
 sys.path.insert(0, project_root)
 from src.common.pyutils.test_build_utils import __eq
-sys.path.append('build/lib.linux-x86_64-cpython-310')
+sys.path.append('build/lib.linux-x86_64-cpython-312')
 import h100_fwd as tk
 
 from collections import defaultdict
@@ -96,12 +96,12 @@ def measure_performance(b, h, n, d):
     for _ in range(10):
         tk.attention_forward_causal(q, k, v, tau, g4, o)
         
-    
+    iters = 100
     torch.cuda.synchronize()
-    start_events = [torch.cuda.Event(enable_timing=True) for _ in range(100)]
-    end_events = [torch.cuda.Event(enable_timing=True) for _ in range(100)]
+    start_events = [torch.cuda.Event(enable_timing=True) for _ in range(iters)]
+    end_events = [torch.cuda.Event(enable_timing=True) for _ in range(iters)]
     
-    for i in range(100):
+    for i in range(iters):
         # Timing the forward pass
         start_events[i].record()
         
@@ -135,7 +135,7 @@ configs = [
     # (32, 32, 4096, 128),
     # (32, 32, 8192, 128),
     # (32, 32, 16384, 128),
-    (6, 24, 2048,128)
+    (6, 24, 2048*2,128)
     ]
 for config in configs:
     measure_performance(*config)

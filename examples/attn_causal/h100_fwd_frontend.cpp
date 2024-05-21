@@ -7,7 +7,7 @@
 
 #include <cuda_runtime.h>
 
-extern void attention_forward_causal(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor tau, torch::Tensor g4, torch::Tensor o);
+extern void attention_forward_causal(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor o);
 
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {

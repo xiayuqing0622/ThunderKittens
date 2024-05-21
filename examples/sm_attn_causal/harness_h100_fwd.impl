@@ -67,12 +67,16 @@ int main(int argc, char **argv) {
     float *k = new float[TOTAL_UNIQUE_ELEMENTS];
     float *v = new float[TOTAL_UNIQUE_ELEMENTS];
     float *o_ref = new float[TOTAL_UNIQUE_ELEMENTS];
+    float *tau = new float[ATTN_H];
+    float *g4 = new float[ATTN_H];
 
     bf16 *q_bf = new bf16[TOTAL_ELEMENTS];
     bf16 *k_bf = new bf16[TOTAL_ELEMENTS];
     bf16 *v_bf = new bf16[TOTAL_ELEMENTS];
     bf16 *o_bf = new bf16[TOTAL_ELEMENTS];
     float *o = new float[TOTAL_ELEMENTS];
+    bf16 *tau_bf = new bf16[ATTN_H];
+    bf16 *g4_bf = new bf16[ATTN_H];
 
     std::ifstream infile(argv[1]);
 
@@ -96,21 +100,26 @@ int main(int argc, char **argv) {
         v_bf[i] = __float2bfloat16(v[i % TOTAL_UNIQUE_ELEMENTS]);
     }
 
-    bf16 *d_q, *d_k, *d_v, *d_o;
+    bf16 *d_q, *d_k, *d_v, *d_o, *d_tau, *d_g4;
     cudaMalloc(&d_q, TOTAL_ELEMENTS * sizeof(bf16));
     cudaMalloc(&d_k, TOTAL_ELEMENTS * sizeof(bf16));
     cudaMalloc(&d_v, TOTAL_ELEMENTS * sizeof(bf16));
     cudaMalloc(&d_o, TOTAL_ELEMENTS * sizeof(bf16));
+    cudaMalloc(&d_tau, ATTN_H * sizeof(bf16));
+    cudaMalloc(&d_g4, ATTN_H * sizeof(bf16));
 
     cudaMemcpy(d_q, q_bf, TOTAL_ELEMENTS * sizeof(bf16), cudaMemcpyHostToDevice);
     cudaMemcpy(d_k, k_bf, TOTAL_ELEMENTS * sizeof(bf16), cudaMemcpyHostToDevice);
     cudaMemcpy(d_v, v_bf, TOTAL_ELEMENTS * sizeof(bf16), cudaMemcpyHostToDevice);
 
+
     CUtensorMap* tma_q_d = tma::allocate_and_create_tensor_map<st_bf<qo_height, 64/16, layout_q>>(d_q, ATTN_B*ATTN_H*ATTN_N/(qo_height * 16));
     CUtensorMap* tma_k_d = tma::allocate_and_create_tensor_map<st_bf<kv_height, 64/16, layout_k>>(d_k, ATTN_B*ATTN_H*ATTN_N/(kv_height * 16));
     CUtensorMap* tma_v_d = tma::allocate_and_create_tensor_map<st_bf<kv_height, 64/16, layout_v>>(d_v, ATTN_B*ATTN_H*ATTN_N/(kv_height * 16));
     CUtensorMap* tma_o_d = tma::allocate_and_create_tensor_map<st_bf<qo_height, 64/16, layout_o>>(d_o, ATTN_B*ATTN_H*ATTN_N/(qo_height * 16));
-
+    
+    __nv_bfloat16* dtau_bf = reinterpret_cast< __nv_bfloat16*>(d_tau);
+    __nv_bfloat16* dg4_bf = reinterpret_cast< __nv_bfloat16*>(d_g4);
     std::cout << "Allocated and set memory on GPU!" << std::endl;
     
     unsigned long mem_size = 112000; // need to launch two blocks if possible.
@@ -127,13 +136,13 @@ int main(int argc, char **argv) {
     cudaDeviceSynchronize();
     std::cout << "Starting warmup" << std::endl;
     for(int i = 0; i < ITER; i++) {    
-        fwd_attend_ker_dim<64><<<grid, BLOCK_SIZE, mem_size>>>(ATTN_N, tma_q_d, tma_k_d, tma_v_d, tma_o_d); 
+        fwd_attend_ker_dim<64><<<grid, BLOCK_SIZE, mem_size>>>(ATTN_N, ATTN_H, tma_q_d, tma_k_d, tma_v_d, dtau_bf, dg4_bf,tma_o_d); 
     }
     cudaDeviceSynchronize();
     std::cout << "Starting kernel" << std::endl;
     const auto start = std::chrono::high_resolution_clock::now();
     for(int i = 0; i < ITER; i++) {
-        fwd_attend_ker_dim<64><<<grid, BLOCK_SIZE, mem_size>>>(ATTN_N, tma_q_d, tma_k_d, tma_v_d, tma_o_d); 
+        fwd_attend_ker_dim<64><<<grid, BLOCK_SIZE, mem_size>>>(ATTN_N, ATTN_H, tma_q_d, tma_k_d, tma_v_d, dtau_bf, dg4_bf, tma_o_d); 
     }
     cudaDeviceSynchronize();
     const auto finish = std::chrono::high_resolution_clock::now();

@@ -75,7 +75,7 @@ void fwd_attend_ker_dim(int N, int H, const CUtensorMap* tma_q, const CUtensorMa
 CUtensorMap* tma_o) {
     extern __shared__ char __shm[]; // this is the CUDA shared memory
     uint64_t* smem_barrier = (uint64_t*)(__shm);
-    int* smem = (int*)(__shm + sizeof(uint64_t) * 3);
+    int* smem = (int*)(__shm + sizeof(uint64_t) * 2);
     // tma_swizzle_allocator al((int*)&__shm[0]);
     tma_swizzle_allocator al(smem);
 
@@ -83,7 +83,7 @@ CUtensorMap* tma_o) {
     st_bf<kv_height, D/kittens::TILE_DIM, layout_k>          (&k_smem)[1][NUM_WORKERS_KV] = al.allocate<st_bf<kv_height, D/kittens::TILE_DIM, layout_k>, 1,       NUM_WORKERS_KV>();
     st_bf<kv_height, D/kittens::TILE_DIM, layout_v>          (&v_smem)[1][NUM_WORKERS_KV] = al.allocate<st_bf<kv_height, D/kittens::TILE_DIM, layout_v>, 1,       NUM_WORKERS_KV>();
 
-    int tic = 0, toc = 0;
+    // int 0 = 0, 0 = 1;
  
     rt_fl<1, kv_height> att_block;
     rt_fl<1, kv_height> gate_block;
@@ -105,12 +105,11 @@ CUtensorMap* tma_o) {
 
     int q_phasebit = 0;
     int kv_phasebit = 0;
-    int v_phasebit = 0;
 
     if (threadIdx.x == 0) {
         tma::init_barrier<st_bf<qo_height, D/kittens::TILE_DIM, layout_q>, NUM_WARPGROUPS>(smem_barrier[0], 1);
-        tma::init_barrier<st_bf<kv_height, D/kittens::TILE_DIM, layout_k>, NUM_WORKERS_KV*1>(smem_barrier[1], 1); 
-        tma::init_barrier<st_bf<kv_height, D/kittens::TILE_DIM, layout_v>, NUM_WORKERS_KV*1>(smem_barrier[2], 1); 
+        tma::init_barrier<st_bf<kv_height, D/kittens::TILE_DIM, layout_k>, NUM_WORKERS_KV*2>(smem_barrier[1], 1); 
+        tma::init_barrier<st_bf<kv_height, D/kittens::TILE_DIM, layout_v>, NUM_WORKERS_KV*2>(smem_barrier[2], 1); 
     }
 
     if (warpid == 0) {
@@ -120,8 +119,8 @@ CUtensorMap* tma_o) {
         }
         for (int w = 0; w < NUM_WORKERS_KV; w++) { // load k, v      
             int tile_idx = (blockIdx.y * NUM_WORKERS_KV * kv_blocks) + (0 * NUM_WORKERS_KV) + w; 
-            tma::load_async((k_smem[tic][w]), tma_k, smem_barrier[1], tile_idx); 
-            // tma::load_async((v_smem[tic][w]), tma_v, smem_barrier[2], tile_idx); 
+            tma::load_async((k_smem[0][w]), tma_k, smem_barrier[1], tile_idx); 
+            // tma::load_async((v_smem[0][w]), tma_v, smem_barrier[1], tile_idx); 
         }
     }
     int tau_index = blockIdx.y % H;
@@ -134,68 +133,70 @@ CUtensorMap* tma_o) {
     __syncthreads();
 
     tma::arrive_and_wait(smem_barrier[0], q_phasebit);
-    // q_phasebit ^= 1;
+    q_phasebit ^= 1;
 
     if constexpr (D == 64) { warpgroup::mul(q_smem[warpgroupid], q_smem[warpgroupid], __float2bfloat16(0.125f)); }
     else { warpgroup::mul(q_smem[warpgroupid], q_smem[warpgroupid], __float2bfloat16(0.08838834764f)); }
 
     for (auto kv_idx = 0; kv_idx <= qo_index; kv_idx++) {
-        if (warpid == 0) {
-            if (kv_idx + 0 < kv_blocks) {
-                // tma::set_bytes(smem_barrier[1], 1 * NUM_WORKERS_KV * k_smem[0][0].num_elements * sizeof(bf16));
-                // if (kv_idx > 0)
-                tma::set_bytes(smem_barrier[2], 1 * NUM_WORKERS_KV * v_smem[0][0].num_elements * sizeof(bf16));
-                for (int w = 0; w < NUM_WORKERS_KV; w++) {        
-                    int tile_idx = (blockIdx.y * NUM_WORKERS_KV * kv_blocks) + ((kv_idx + 0) * NUM_WORKERS_KV) + w; 
-                    // tma::load_async((k_smem[toc][w]), tma_k, smem_barrier[1], tile_idx); 
-                    tma::load_async((v_smem[toc][w]), tma_v, smem_barrier[2], tile_idx);
-                }
-            }
-        }
-        tma::arrive_and_wait(smem_barrier[1], kv_phasebit);
-        // tma::arrive_and_wait(smem_barrier[2], v_phasebit);
-        kv_phasebit ^= 1;
-        // v_phasebit ^= 1;
-
+        // __syncthreads();
+        // if (warpid == 0) {
+        //     tma::set_bytes(smem_barrier[2], 1 * NUM_WORKERS_KV * v_smem[0][0].num_elements * sizeof(bf16));
+        //     for (int w = 0; w < NUM_WORKERS_KV; w++) { // load k, v      
+        //         int tile_idx = (blockIdx.y * NUM_WORKERS_KV * kv_blocks) + (0 * NUM_WORKERS_KV) + w; 
+        //         tma::load_async((v_smem[0][w]), tma_v, smem_barrier[2], tile_idx); 
+        //     }
+        // }
         __syncthreads();
+
+        tma::arrive_and_wait(smem_barrier[1], kv_phasebit);
+        // kv_phasebit ^= 1;
+
+        // __syncthreads();
         // if (warpid == 0) {
         //     if (kv_idx + 1 < kv_blocks) {
-        //         tma::set_bytes(smem_barrier[1], 1 * NUM_WORKERS_KV * k_smem[0][0].num_elements * sizeof(bf16));
-        //         tma::set_bytes(smem_barrier[2], 1 * NUM_WORKERS_KV * v_smem[0][0].num_elements * sizeof(bf16));
+        //         tma::set_bytes(smem_barrier[1], 2 * NUM_WORKERS_KV * k_smem[0][0].num_elements * sizeof(bf16));
+                
         //         for (int w = 0; w < NUM_WORKERS_KV; w++) {        
         //             int tile_idx = (blockIdx.y * NUM_WORKERS_KV * kv_blocks) + ((kv_idx + 1) * NUM_WORKERS_KV) + w; 
-        //             tma::load_async((k_smem[toc][w]), tma_k, smem_barrier[1], tile_idx); 
-        //             tma::load_async((v_smem[toc][w]), tma_v, smem_barrier[2], tile_idx);
+        //             tma::load_async((k_smem[0][w]), tma_k, smem_barrier[1], tile_idx); 
+        //             tma::load_async((v_smem[0][w]), tma_v, smem_barrier[1], tile_idx);
         //         }
         //     }
         // }
 
         warpgroup::mma_fence(att_block);
-        warpgroup::mm_ABt(att_block, q_smem[warpgroupid], k_smem[tic][0]);
+        warpgroup::mm_ABt(att_block, q_smem[warpgroupid], k_smem[0][0]);
         warpgroup::mma_commit_group();
 
         // copy(norm_vec_last, norm_vec);
-        copy(max_vec_last,  max_vec);
-        copy(gate_max_vec_last, gate_max_vec);
+        // copy(max_vec_last,  max_vec);
+        // copy(gate_max_vec_last, gate_max_vec);
 
         warpgroup::mma_async_wait();
+        warpgroup::mma_fence(att_block);
+        __syncthreads();
 
-        if (warpid == 0) {
-            if (kv_idx + 1 < kv_blocks) {
-                tma::set_bytes(smem_barrier[1], 1 * NUM_WORKERS_KV * k_smem[0][0].num_elements * sizeof(bf16));
-                // tma::set_bytes(smem_barrier[2], 1 * NUM_WORKERS_KV * v_smem[0][0].num_elements * sizeof(bf16));
-                for (int w = 0; w < NUM_WORKERS_KV; w++) {        
-                    int tile_idx = (blockIdx.y * NUM_WORKERS_KV * kv_blocks) + ((kv_idx + 1) * NUM_WORKERS_KV) + w; 
-                    tma::load_async((k_smem[toc][w]), tma_k, smem_barrier[1], tile_idx); 
-                    // tma::load_async((v_smem[toc][w]), tma_v, smem_barrier[2], tile_idx);
-                }
-            }
-        }
 
         if (kv_idx == qo_index) {
             wg_make_causal(att_block, att_block, -INFINITY); 
         }
 
+        if (warpid == 0) {
+            if (kv_idx + 1 < kv_blocks) {
+                tma::set_bytes(smem_barrier[1], 1 * NUM_WORKERS_KV * k_smem[0][0].num_elements * sizeof(bf16));
+                
+                for (int w = 0; w < NUM_WORKERS_KV; w++) {        
+                    int tile_idx = (blockIdx.y * NUM_WORKERS_KV * kv_blocks) + ((kv_idx + 1) * NUM_WORKERS_KV) + w; 
+                    tma::load_async((k_smem[0][w]), tma_k, smem_barrier[1], tile_idx); 
+                }
+            }
+        }
+         __syncthreads();
+
+        copy(norm_vec_last, norm_vec);
+        copy(max_vec_last,  max_vec);
+        copy(gate_max_vec_last, gate_max_vec);
         // #pragma unroll
         // for(int i = 0; i < gate_block.height; i++) {
         //     #pragma unroll
@@ -219,38 +220,35 @@ CUtensorMap* tma_o) {
 
         sub(max_vec_last, max_vec_last, max_vec);
         exp(max_vec_last, max_vec_last);
-        // mul(norm_vec, norm_vec, max_vec_last);
-
-        mul_row(o_prev, o_prev,max_vec_last);
-        mul_row(o_prev, o_prev, gate_max_vec_last);
-        div_row(o_prev, o_prev, gate_max_vec);
-
         mul(norm_vec, norm_vec, max_vec_last);
+
         row_sum(norm_vec, att_block, norm_vec); // accumulate onto the norm_vec
-        // div_row(att_block, att_block, norm_vec);
+        div_row(att_block, att_block, norm_vec);
 
-        // mul(norm_vec_last, norm_vec_last, max_vec_last);
-        // div(norm_vec_last, norm_vec_last, norm_vec);
+        mul(norm_vec_last, norm_vec_last, max_vec_last);
+        div(norm_vec_last, norm_vec_last, norm_vec);
 
-        // mul(norm_vec_last, norm_vec_last, gate_max_vec_last);
-        // div(norm_vec_last, norm_vec_last, gate_max_vec);
+        mul(norm_vec_last, norm_vec_last, gate_max_vec_last);
+        div(norm_vec_last, norm_vec_last, gate_max_vec);
 
         mul(att_block, att_block, gate_block);
         div_row(att_block, att_block, gate_max_vec);
 
         copy(att_block_mma, att_block); // convert to bf16 for mma
-        // mul_row(o_prev, o_prev, norm_vec_last); // normalize o_prev in advance of mma'ing onto it
-
-        // tma::arrive_and_wait(smem_barrier[1], kv_phasebit);
-        tma::arrive_and_wait(smem_barrier[2], v_phasebit);
-        // kv_phasebit ^= 1;
-        v_phasebit ^= 1;
+        mul_row(o_prev, o_prev, norm_vec_last); // normalize o_prev in advance of mma'ing onto it
+        __syncthreads();
+        tma::arrive_and_wait(smem_barrier[1], kv_phasebit);
+        
+        __syncthreads();
         warpgroup::mma_fence(o_prev);
-        warpgroup::mma_AB(o_prev, att_block_mma, v_smem[tic][0]);
+        warpgroup::mma_AB(o_prev, att_block_mma, v_smem[0][0]);
         warpgroup::mma_commit_group();
-    }
+        warpgroup::mma_async_wait();
+        warpgroup::mma_fence(o_prev);
+        __syncthreads();
+        kv_phasebit ^= 1;
 
-    div_row(o_prev, o_prev, norm_vec);
+    }
 
     auto (*o_smem) = reinterpret_cast<st_bf<qo_height, D/kittens::TILE_DIM, layout_o>(*)>(q_smem); // reuse q memory
     warpgroup::store(o_smem[warpgroupid], o_prev); 
@@ -329,7 +327,7 @@ void attention_forward_causal(torch::Tensor q, torch::Tensor k, torch::Tensor v,
         CUtensorMap* tma_v_d = tma::allocate_and_create_tensor_map<kittens::st_bf<kv_height, 8, layout_v>>(v_bf, (batch*heads*N)/(kv_height * 16));
         CUtensorMap* tma_o_d = tma::allocate_and_create_tensor_map<kittens::st_bf<qo_height, 8, layout_o>>(o_bf, (batch*heads*N)/(qo_height * 16));
 
-        unsigned long mem_size = 112000;
+        unsigned long mem_size = 112000;//101376;
         cudaFuncSetAttribute(fwd_attend_ker_dim<128>, cudaFuncAttributeMaxDynamicSharedMemorySize, mem_size);
 
         dim3 grid(N/(NUM_WORKERS*kittens::TILE_DIM), batch*heads, 1);
@@ -340,6 +338,6 @@ void attention_forward_causal(torch::Tensor q, torch::Tensor k, torch::Tensor v,
     CHECK_CUDA_ERROR(cudaGetLastError());
 }
 #else
-#include "harness_h100_fwd.impl"
+// #include "harness_h100_fwd.impl"
 #endif
 

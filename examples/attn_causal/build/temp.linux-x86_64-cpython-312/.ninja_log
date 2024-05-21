@@ -1,0 +1,6 @@
+# ninja log v5
+0	5147	1716198124947110547	/home/lidong1/yuqxia/ThunderKittens/examples/attn_causal/build/temp.linux-x86_64-cpython-312/h100_fwd.o	b913a786d50e9a4
+0	12818	1716198132611187025	/home/lidong1/yuqxia/ThunderKittens/examples/attn_causal/build/temp.linux-x86_64-cpython-312/h100_fwd_frontend.o	6a837727c8791db
+31	47282	1716198260408462274	/home/lidong1/yuqxia/ThunderKittens/examples/attn_causal/build/temp.linux-x86_64-cpython-312/h100_fwd.o	b913a786d50e9a4
+34	46680	1716204890313177250	/home/lidong1/yuqxia/ThunderKittens/examples/attn_causal/build/temp.linux-x86_64-cpython-312/h100_fwd.o	b913a786d50e9a4
+33	46870	1716260767923375467	/home/lidong1/yuqxia/ThunderKittens/examples/attn_causal/build/temp.linux-x86_64-cpython-312/h100_fwd.o	b913a786d50e9a4

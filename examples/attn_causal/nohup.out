@@ -1,0 +1,18 @@
+========= COMPUTE-SANITIZER
+Correctness Tests: 
+Testing with b=6, h=24, n=2048, d=128
+Attention output - avg magnitude of diff: nan
+----------------------------------------
+Attention Output  all_close=False
+all_close=False, max=nan, min=nan, mean=nan
+Traceback (most recent call last):
+  File "/home/lidong1/yuqxia/ThunderKittens/examples/attn_causal/h100_fwd_check.py", line 81, in <module>
+    check_correctness(b, h, n, d)
+  File "/home/lidong1/yuqxia/ThunderKittens/examples/attn_causal/h100_fwd_check.py", line 60, in check_correctness
+    debug("Attention Output", result_pytorch, tk_result)
+  File "/home/lidong1/yuqxia/ThunderKittens/examples/attn_causal/h100_fwd_check.py", line 27, in debug
+    first_index = tuple(max_indices[0].tolist())
+                        ~~~~~~~~~~~^^^
+IndexError: index 0 is out of bounds for dimension 0 with size 0
+========= Target application returned an error
+========= ERROR SUMMARY: 0 errors

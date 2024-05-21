@@ -178,6 +178,7 @@ struct shared_allocator {
         __device__ inline void align_ptr() {
             if constexpr (alignment > 0) {
                 uint64_t p = reinterpret_cast<uint64_t>(ptr);
+                // if (blockIdx.x == 0 && blockIdx.y == 0 &&  threadIdx.x == 0) printf("aligning %p to %p, aligment = %d\n", ptr, p + (alignment-(p%alignment)), (int)(alignment-(p%alignment)));
                 ptr = (int*)(p + (alignment-(p%alignment)));
             }
         }

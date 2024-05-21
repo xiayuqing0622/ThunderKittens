@@ -3,11 +3,12 @@ import sys
 import os
 import time
 
+
 current_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.abspath(os.path.join(current_dir, "../../"))
 sys.path.insert(0, project_root)
 from src.common.pyutils.test_build_utils import __eq
-sys.path.append('build/lib.linux-x86_64-cpython-310')
+sys.path.append('build/lib.linux-x86_64-cpython-312')
 import h100_fwd as mod
 
 from collections import defaultdict
@@ -66,8 +67,8 @@ def debug(name,expect, actual, atol=1e-3, rtol=1e-3):
         first_index = tuple(max_indices[0].tolist())
         print(f"Index: {first_index}, expect: {expect[first_index]}, actual: {actual[first_index]}") 
         # if actual.shape[1] == 2:
-        #     print(actual[0,1, :,:])
-        #     print(expect[0,1, :,:])
+        # print(actual[5,8, :512,113])
+        # print(expect[5,8, :512,113])
 
     return all_close
 
